@@ -1,0 +1,241 @@
+package STNet
+
+import (
+	"fmt"
+	"encoding/json"
+	"encoding/xml"
+	"net/http"
+	"io/ioutil"
+	"reflect"
+	"github.com/NiuStar/server/gin"
+	"strconv"
+
+
+)
+//要求返回值结构体里必须有这个，才可以自动解析出给客户端的数据格式
+type IResult struct {
+	ResponseType ResponseType
+}
+
+func (result *IResult)SetResponseType(t ResponseType) {
+	result.ResponseType = t
+}
+
+type Request struct {
+	body string
+	responseError interface{}
+}
+//对客户端来源数据进行解析，这样子只支持了Content-Type为application/json的数据
+func (req *Request)DealReq( r *http.Request) error {
+	s, err := ioutil.ReadAll(r.Body) //把  body 内容读入字符串 s
+	req.body = string(s)
+	return err
+}
+
+//根据设定的传参结构体及返回值的结构体及返回客户端的数据格式，进行自动解析
+func (req *Request)ParseParam(param ,result interface{}) error {
+
+	t := reflect.ValueOf(param)
+	v := reflect.New(t.Type()).Interface()
+	err := json.Unmarshal([]byte(req.body),&v)
+	t.Elem().Set(reflect.ValueOf(v).Elem().Elem())
+
+	if err != nil {
+		return err
+	}
+
+	result_value := reflect.ValueOf(result)
+	for ;reflect.Ptr == result_value.Kind(); {
+		result_value = result_value.Elem()
+	}
+	responseType := result_value.FieldByName("IResult").FieldByName("ResponseType")
+
+	//根据设置的返回值类型设置返回客户端的默认展示形式，如果为struct默认为JSON
+	switch reflect.TypeOf(result).String() {
+		case "*Basic.STRING":{
+			responseType.SetInt(STRING)
+		}
+		case "*Basic.FILE":{
+			responseType.SetInt(FILE)
+		}
+		default:{
+			responseType.SetInt(JSON)
+		}
+	}
+
+	args := []reflect.Value{reflect.ValueOf(result)}
+	results := t.MethodByName("Handler").Call(args)
+
+
+	//函数返回值是否为空，空的话就代表处理客户端请求成功
+	if results[0].IsNil() || !results[0].IsValid() {
+		req.responseError = nil
+	} else {
+		error := reflect.New( results[0].Type()).Interface()
+		error_t := reflect.ValueOf(error)
+		error_t.Elem().Set(results[0])
+		req.responseError = error
+	}
+	return nil
+}
+
+type reqAndResponse struct {
+	request reflect.Type
+	response reflect.Type
+}
+
+var routers = make(map[string]*reqAndResponse)
+
+//注册路由，根据路由来设置对应的接收参数和返回值
+func Register(op string,request,response interface{}) {
+
+	req := reflect.TypeOf(request)
+
+	if reflect.Ptr == req.Kind() {
+		req = reflect.TypeOf(request).Elem()
+	}
+
+	resp := reflect.TypeOf(response)
+
+	if reflect.Ptr == resp.Kind() {
+		resp = reflect.TypeOf(response).Elem()
+	}
+
+	_,have := resp.FieldByName("ResponseType")
+	if !have {
+		panic(resp.Name() + "没有继承IResult")
+	}
+
+	routers[op] = &reqAndResponse{request:req,response:resp}
+}
+
+func RequestRouter(c *gin.Context) {
+	op := c.DefaultQuery("op","")
+
+	var request interface{}
+	var response interface{}
+	if routers[op] != nil {
+		request = reflect.New(routers[op].request).Interface()
+		response = reflect.New(routers[op].response).Interface()
+	} else {
+		c.String(http.StatusNotFound,``)
+	}
+
+	req := Request{}
+	err := req.DealReq(c.Request)
+	if err != nil {
+		panic(err)
+	}
+	err = req.ParseParam(request,response)
+
+	if err != nil {
+		panic(err)
+	}
+
+	if req.responseError != nil {
+
+		resp := reflect.TypeOf(req.responseError)
+
+		for ;reflect.Ptr == resp.Kind(); {
+			resp = resp.Elem()
+		}
+		fmt.Println("1:",resp,resp.Kind().String())
+		if resp.Kind() == reflect.Struct {
+			fmt.Println("resp.Kind() == reflect.Struct")
+			_,have := resp.FieldByName("ResponseType")
+			if !have {
+				fmt.Println("2")
+				body,err := json.MarshalIndent(req.responseError, "", "\t")
+				if err != nil {
+					panic(err)
+				}
+
+				c.String(http.StatusOK,string(body))
+			} else {
+
+				fmt.Println("3")
+				type_ := reflect.ValueOf(req.responseError)
+				for ;reflect.Ptr == type_.Kind(); {
+					type_ = type_.Elem()
+				}
+				responseType := type_.FieldByName("IResult").FieldByName("ResponseType")
+
+				switch responseType.Int() {
+
+				case STRING:{
+					c.String(http.StatusOK,type_.FieldByName("Body").String())
+				}
+				case XML:{
+					body,err := xml.MarshalIndent(req.responseError, "", "\t")
+					if err != nil {
+						panic(err)
+					}
+
+					c.String(http.StatusOK,string(body))
+				}
+				default:
+					{
+						body,err := json.MarshalIndent(req.responseError, "", "\t")
+						if err != nil {
+							panic(err)
+						}
+
+						c.String(http.StatusOK,string(body))
+					}
+				}
+			}
+			return
+		} else if resp.Kind() == reflect.String {
+
+			c.String(http.StatusOK,*(req.responseError.(*string)))
+			return
+		} else if resp.Kind() == reflect.Int {
+
+			c.String(http.StatusOK,strconv.FormatInt(int64(*(req.responseError.(*int))),10))
+			return
+		} else if reflect.Ptr == resp.Kind() {
+			resp = reflect.TypeOf(req.responseError).Elem()
+			fmt.Println("5:",resp,resp.Kind().String())
+		}
+
+
+	} else {
+		fmt.Println("resp.Kind() != reflect.Struct")
+
+		type_ := reflect.ValueOf(response)
+		for ;reflect.Ptr == type_.Kind(); {
+			type_ = type_.Elem()
+		}
+		responseType := type_.FieldByName("IResult").FieldByName("ResponseType")
+
+		switch responseType.Int() {
+
+		case STRING:{
+			c.String(http.StatusOK,type_.FieldByName("Body").String())
+		}
+		case FILE:{
+			c.File(type_.FieldByName("FilePath").String())
+		}
+		case XML:{
+			body,err := xml.MarshalIndent(response, "", "\t")
+			if err != nil {
+				panic(err)
+			}
+
+			c.String(http.StatusOK,string(body))
+		}
+		default:
+			{
+				body,err := json.MarshalIndent(response, "", "\t")
+				if err != nil {
+					panic(err)
+				}
+
+				c.String(http.StatusOK,string(body))
+			}
+		}
+	}
+
+
+	//c.File()
+}
