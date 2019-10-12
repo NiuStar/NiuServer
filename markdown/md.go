@@ -2,7 +2,7 @@ package markdown
 
 import (
 	"github.com/NiuStar/Basic"
-	"github.com/NiuStar/markdown"
+	"github.com/petreler/markdown"
 	"github.com/NiuStar/log"
 	reflect2 "github.com/NiuStar/reflect"
 	"github.com/NiuStar/xsql4/Type"
